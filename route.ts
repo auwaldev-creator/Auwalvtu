@@ -1,116 +1,122 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { z } from "zod";
-import { randomUUID } from "crypto";
 import { getAdminClient } from "@/lib/supabaseAdmin";
-import { generateAccountNumber, hashSecret } from "@/lib/security";
+import { compareSecret } from "@/lib/security";
+import { parseSession, sessionCookieName } from "@/lib/session";
+import { randomUUID } from "crypto";
 
-const payloadSchema = z.object({
-  fullName: z.string().min(3),
-  email: z.string().email(),
-  phone: z.string().min(7),
-  ninOrBvn: z.string().min(8),
-  bankChoice: z.string(),
-  password: z.string().min(8),
-  confirmPassword: z.string().min(8),
+const transactionSchema = z.object({
+  kind: z.string(),
+  direction: z.enum(["debit", "credit"]),
+  amount: z.number().positive(),
+  metadata: z.record(z.string(), z.any()).optional(),
   pin: z.string().min(4).max(6),
-  confirmPin: z.string().min(4).max(6),
-  accepted: z.boolean(),
-  faceSample: z.string().optional(),
 });
+
+function requireSession() {
+  const cookie = cookies().get(sessionCookieName)?.value;
+  const payload = parseSession(cookie);
+  if (!payload) {
+    throw new Error("Unauthorized");
+  }
+  return payload;
+}
+
+export async function GET() {
+  try {
+    const session = requireSession();
+    const supabase = getAdminClient();
+
+    const [{ data: transactions }, { data: wallet }, { data: profile }] = await Promise.all([
+      supabase
+        .from("transactions")
+        .select("*")
+        .eq("user_id", session.id)
+        .order("created_at", { ascending: false })
+        .limit(20),
+      supabase.from("wallets").select("*").eq("user_id", session.id).maybeSingle(),
+      supabase
+        .from("profiles")
+        .select("full_name, account_number, role, status, bank_choice")
+        .eq("id", session.id)
+        .maybeSingle(),
+    ]);
+
+    return NextResponse.json({ transactions: transactions ?? [], wallet, profile });
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: error.message === "Unauthorized" ? 401 : 500 });
+  }
+}
 
 export async function POST(request: Request) {
   try {
-    const json = await request.json();
-    const payload = payloadSchema.parse(json);
-
-    if (payload.password !== payload.confirmPassword) {
-      return NextResponse.json({ error: "Passwords do not match" }, { status: 400 });
-    }
-    if (payload.pin !== payload.confirmPin) {
-      return NextResponse.json({ error: "PINs do not match" }, { status: 400 });
-    }
-    if (!payload.accepted) {
-      return NextResponse.json({ error: "Consent is required" }, { status: 400 });
-    }
-
+    const session = requireSession();
+    const body = await request.json();
+    const payload = transactionSchema.parse(body);
     const supabase = getAdminClient();
 
-    const { data: existing, error: existingError } = await supabase
-      .from("profiles")
-      .select("id")
-      .eq("email", payload.email);
-
-    if (existingError) {
-      console.error(existingError);
-      return NextResponse.json({ error: "Database read error" }, { status: 500 });
+    const { data: profile } = await supabase.from("profiles").select("*").eq("id", session.id).maybeSingle();
+    if (!profile) {
+      return NextResponse.json({ error: "Profile missing" }, { status: 404 });
     }
 
-    if (existing && existing.length > 0) {
-      return NextResponse.json({ error: "Email already registered" }, { status: 409 });
+    const pinMatch = await compareSecret(payload.pin, profile.pin_hash);
+    if (!pinMatch) {
+      const resumeAt = new Date(Date.now() + 60 * 60 * 1000);
+      await supabase
+        .from("profiles")
+        .update({
+          wrong_pin_count: (profile.wrong_pin_count ?? 0) + 1,
+          last_pin_attempt_at: new Date().toISOString(),
+          status: "suspended",
+          suspended_until: resumeAt.toISOString(),
+        })
+        .eq("id", profile.id);
+
+      await supabase.from("admin_alerts").insert({
+        user_id: profile.id,
+        category: "pin_lock",
+        message: `${profile.full_name} suspended after wrong transaction PIN`,
+      });
+
+      return NextResponse.json({ error: "Wrong PIN; account suspended for 1 hour" }, { status: 423 });
     }
 
-    const { data: admins, error: adminError } = await supabase
-      .from("profiles")
-      .select("id")
-      .eq("role", "admin");
-
-    if (adminError) {
-      console.error(adminError);
-      return NextResponse.json({ error: "Database read error" }, { status: 500 });
+    const { data: wallet } = await supabase.from("wallets").select("*").eq("user_id", session.id).maybeSingle();
+    if (!wallet) {
+      return NextResponse.json({ error: "Wallet missing" }, { status: 404 });
     }
 
-    const role = admins?.length ? "customer" : "admin";
-    const id = randomUUID();
-    const accountNumber = generateAccountNumber(payload.phone + Date.now());
-    const passwordHash = await hashSecret(payload.password);
-    const pinHash = await hashSecret(payload.pin);
+    const amount = payload.amount;
+    const balanceBefore = Number(wallet.wallet_balance ?? 0);
+    const balanceAfter = payload.direction === "debit" ? balanceBefore - amount : balanceBefore + amount;
 
-    let facePath: string | null = null;
-    if (payload.faceSample) {
-      const base64 = payload.faceSample.split(",")[1];
-      const buffer = Buffer.from(base64, "base64");
-      facePath = `faces/${id}.png`;
-      const { error: uploadError } = await supabase.storage
-        .from("biometrics")
-        .upload(facePath, buffer, {
-          contentType: "image/png",
-          upsert: true,
-        });
-      if (uploadError) {
-        console.error(uploadError);
-        return NextResponse.json({ error: "Failed to store face template" }, { status: 500 });
-      }
+    if (balanceAfter < 0) {
+      return NextResponse.json({ error: "Insufficient balance" }, { status: 400 });
     }
 
-    const { error: insertError } = await supabase.from("profiles").insert({
-      id,
-      full_name: payload.fullName,
-      email: payload.email.toLowerCase(),
-      phone: payload.phone,
-      nin_or_bvn: payload.ninOrBvn,
-      bank_choice: payload.bankChoice,
-      role,
-      face_template_url: facePath,
-      account_number: accountNumber,
-      password_hash: passwordHash,
-      pin_hash: pinHash,
+    await supabase
+      .from("wallets")
+      .update({ wallet_balance: balanceAfter, updated_at: new Date().toISOString() })
+      .eq("user_id", session.id);
+
+    const reference = `ATP|${randomUUID()}`;
+    await supabase.from("transactions").insert({
+      user_id: session.id,
+      amount,
+      kind: payload.kind,
+      direction: payload.direction,
+      status: "successful",
+      metadata: payload.metadata ?? {},
+      balance_before: balanceBefore,
+      balance_after: balanceAfter,
+      reference,
     });
 
-    if (insertError) {
-      console.error(insertError);
-      return NextResponse.json({ error: "Failed to create profile" }, { status: 500 });
-    }
-
-    await supabase.from("wallets").insert({ user_id: id });
-    await supabase.from("admin_alerts").insert({
-      user_id: id,
-      category: "new_registration",
-      message: `${payload.fullName} joined Auwntech as ${role}`,
-    });
-
-    return NextResponse.json({ success: true, accountNumber, role });
+    return NextResponse.json({ success: true, reference, balance_after: balanceAfter });
   } catch (error: any) {
-    console.error(error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const status = error.message === "Unauthorized" ? 401 : 500;
+    return NextResponse.json({ error: error.message }, { status });
   }
 }

@@ -1,139 +1,237 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { CameraCapture } from "@/components/CameraCapture";
+import { Stepper } from "@/components/Stepper";
+import { useState } from "react";
 
-interface Alert {
-  id: string;
-  category: string;
-  message: string;
-  created_at: string;
-}
+const steps = ["Personal", "Identity", "Security"];
 
-export default function AdminPage() {
-  const [overview, setOverview] = useState<{ total_wallet_value: number; active_suspensions: number; alerts: Alert[] } | null>(null);
-  const [adjustForm, setAdjustForm] = useState({ targetUserId: "", amount: "", direction: "credit", note: "" });
+type FormState = {
+  fullName: string;
+  email: string;
+  phone: string;
+  ninOrBvn: string;
+  bankChoice: string;
+  password: string;
+  confirmPassword: string;
+  pin: string;
+  confirmPin: string;
+  accepted: boolean;
+  faceSample?: string;
+};
+
+export default function SignupPage() {
+  const [currentStep, setCurrentStep] = useState(1);
+  const [form, setForm] = useState<FormState>({
+    fullName: "",
+    email: "",
+    phone: "",
+    ninOrBvn: "",
+    bankChoice: "Auwntech • Providus Bank",
+    password: "",
+    confirmPassword: "",
+    pin: "",
+    confirmPin: "",
+    accepted: false,
+  });
+  const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    const loadOverview = async () => {
-      const response = await fetch("/api/admin/overview", { cache: "no-store" });
-      const data = await response.json();
-      if (response.ok) {
-        setOverview({
-          total_wallet_value: Number(data.total_wallet_value),
-          active_suspensions: data.active_suspensions,
-          alerts: data.alerts ?? [],
-        });
-      } else {
-        setMessage(data.error ?? "Unable to load admin data");
-      }
-    };
-    loadOverview();
-  }, []);
+  const canContinue = () => {
+    if (currentStep === 1) {
+      return form.fullName && form.email && form.phone && form.ninOrBvn;
+    }
+    if (currentStep === 2) {
+      return Boolean(form.faceSample);
+    }
+    return (
+      form.password.length >= 8 &&
+      form.password === form.confirmPassword &&
+      form.pin.length >= 4 &&
+      form.pin === form.confirmPin &&
+      form.accepted
+    );
+  };
 
-  const handleAdjust = async () => {
+  const next = () => {
+    if (!canContinue()) return;
+    setCurrentStep((prev) => Math.min(prev + 1, steps.length));
+  };
+
+  const back = () => setCurrentStep((prev) => Math.max(prev - 1, 1));
+
+  const handleSubmit = async () => {
+    if (!canContinue()) return;
+    setLoading(true);
     setMessage(null);
-    const payload = {
-      targetUserId: adjustForm.targetUserId,
-      amount: Number(adjustForm.amount),
-      direction: adjustForm.direction,
-      note: adjustForm.note,
-    };
-    const response = await fetch("/api/admin/funds", {
+
+    const response = await fetch("/api/auth/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(form),
     });
     const data = await response.json();
+
     if (!response.ok) {
-      setMessage(data.error ?? "Unable to adjust funds");
-      return;
+      setMessage(data.error ?? "Unable to create account");
+    } else {
+      setMessage("Account created! Redirecting to dashboard...");
+      window.location.href = "/dashboard";
     }
-    setMessage(`Adjustment successful (ref ${data.reference})`);
+    setLoading(false);
   };
 
   return (
-    <div className="mx-auto max-w-6xl space-y-8 px-6 py-12">
-      <div>
-        <p className="text-sm text-white/60">Admin authority</p>
-        <h1 className="text-3xl font-semibold text-white">System-wide controls</h1>
-      </div>
-      {message && <p className="text-sm text-emerald-300">{message}</p>}
-      <section className="grid gap-4 md:grid-cols-3">
-        <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-          <p className="text-white/60">Total wallet value</p>
-          <p className="text-3xl font-semibold text-white">₦{overview?.total_wallet_value?.toLocaleString()}</p>
+    <div className="mx-auto max-w-5xl px-6 py-16">
+      <div className="rounded-3xl border border-white/10 bg-black/30 p-8 shadow-glow">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p className="text-sm uppercase tracking-[0.3em] text-white/60">Create account</p>
+            <h1 className="text-3xl font-semibold text-white">Opay-style onboarding, Auwntech security</h1>
+          </div>
+          <Stepper step={currentStep} total={steps.length} />
         </div>
-        <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-          <p className="text-white/60">Active suspensions</p>
-          <p className="text-3xl font-semibold text-white">{overview?.active_suspensions ?? 0}</p>
-        </div>
-        <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-6">
-          <p className="text-white/60">Alerts awaiting review</p>
-          <p className="text-3xl font-semibold text-white">{overview?.alerts?.length ?? 0}</p>
-        </div>
-      </section>
-
-      <section className="rounded-3xl border border-white/10 bg-white/[0.03] p-6">
-        <h2 className="text-2xl font-semibold text-white">Fund adjustments</h2>
-        <div className="mt-6 grid gap-4 md:grid-cols-2">
-          <label className="text-sm text-white/70">
-            Target user ID
-            <input
-              className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
-              value={adjustForm.targetUserId}
-              onChange={(e) => setAdjustForm({ ...adjustForm, targetUserId: e.target.value })}
-            />
-          </label>
-          <label className="text-sm text-white/70">
-            Amount (₦)
-            <input
-              className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
-              value={adjustForm.amount}
-              onChange={(e) => setAdjustForm({ ...adjustForm, amount: e.target.value })}
-            />
-          </label>
-          <label className="text-sm text-white/70">
-            Direction
-            <select
-              className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
-              value={adjustForm.direction}
-              onChange={(e) => setAdjustForm({ ...adjustForm, direction: e.target.value })}
-            >
-              <option value="credit">Credit</option>
-              <option value="debit">Debit</option>
-            </select>
-          </label>
-          <label className="text-sm text-white/70">
-            Note (optional)
-            <input
-              className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
-              value={adjustForm.note}
-              onChange={(e) => setAdjustForm({ ...adjustForm, note: e.target.value })}
-            />
-          </label>
-        </div>
-        <button
-          onClick={handleAdjust}
-          className="mt-6 w-full rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-400 px-4 py-3 text-lg font-semibold text-black"
-        >
-          Apply adjustment
-        </button>
-      </section>
-
-      <section className="rounded-3xl border border-white/10 bg-white/[0.03] p-6">
-        <h2 className="text-2xl font-semibold text-white">Alert feed</h2>
-        <div className="mt-4 space-y-4">
-          {overview?.alerts?.map((alert) => (
-            <div key={alert.id} className="border-l-4 border-red-400/70 bg-white/[0.02] px-4 py-3">
-              <p className="font-semibold text-white">{alert.category}</p>
-              <p className="text-sm text-white/70">{alert.message}</p>
-              <p className="text-xs text-white/40">{new Date(alert.created_at).toLocaleString()}</p>
+        <div className="mt-6 flex flex-wrap gap-4 text-sm text-white/60">
+          {steps.map((title, index) => (
+            <div key={title} className={`rounded-full px-4 py-1 ${index + 1 === currentStep ? "bg-white/10" : "bg-white/5"}`}>
+              Step {index + 1}: {title}
             </div>
           ))}
-          {overview?.alerts?.length === 0 && <p className="text-sm text-white/60">No pending alerts.</p>}
         </div>
-      </section>
+        <div className="mt-8 space-y-6">
+          {currentStep === 1 && (
+            <div className="grid gap-5 md:grid-cols-2">
+              <label className="text-sm text-white/70">
+                Full name
+                <input
+                  className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                  value={form.fullName}
+                  onChange={(e) => setForm({ ...form, fullName: e.target.value })}
+                />
+              </label>
+              <label className="text-sm text-white/70">
+                Email address
+                <input
+                  className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                  value={form.email}
+                  onChange={(e) => setForm({ ...form, email: e.target.value })}
+                />
+              </label>
+              <label className="text-sm text-white/70">
+                Phone number
+                <input
+                  className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                  value={form.phone}
+                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                />
+              </label>
+              <label className="text-sm text-white/70">
+                NIN or BVN
+                <input
+                  className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                  value={form.ninOrBvn}
+                  onChange={(e) => setForm({ ...form, ninOrBvn: e.target.value })}
+                />
+              </label>
+            </div>
+          )}
+          {currentStep === 2 && (
+            <div className="space-y-6">
+              <p className="text-white/70">
+                Allow camera access to capture a live portrait. Auwntech encrypts every biometric template before storing in Supabase.
+              </p>
+              <CameraCapture onCapture={(dataUrl) => setForm({ ...form, faceSample: dataUrl })} />
+              {form.faceSample && (
+                <img src={form.faceSample} alt="Face sample" className="h-32 w-32 rounded-2xl border border-white/10 object-cover" />
+              )}
+              <label className="text-sm text-white/70">
+                Preferred bank partner
+                <select
+                  className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                  value={form.bankChoice}
+                  onChange={(e) => setForm({ ...form, bankChoice: e.target.value })}
+                >
+                  <option>Auwntech • Providus Bank</option>
+                  <option>Auwntech • Moniepoint</option>
+                </select>
+              </label>
+            </div>
+          )}
+          {currentStep === 3 && (
+            <div className="grid gap-5 md:grid-cols-2">
+              <label className="text-sm text-white/70">
+                Create password
+                <input
+                  type="password"
+                  className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                  value={form.password}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                />
+              </label>
+              <label className="text-sm text-white/70">
+                Confirm password
+                <input
+                  type="password"
+                  className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                  value={form.confirmPassword}
+                  onChange={(e) => setForm({ ...form, confirmPassword: e.target.value })}
+                />
+              </label>
+              <label className="text-sm text-white/70">
+                Create 4-6 digit PIN
+                <input
+                  maxLength={6}
+                  className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                  value={form.pin}
+                  onChange={(e) => setForm({ ...form, pin: e.target.value.replace(/[^0-9]/g, "") })}
+                />
+              </label>
+              <label className="text-sm text-white/70">
+                Confirm PIN
+                <input
+                  maxLength={6}
+                  className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                  value={form.confirmPin}
+                  onChange={(e) => setForm({ ...form, confirmPin: e.target.value.replace(/[^0-9]/g, "") })}
+                />
+              </label>
+              <label className="col-span-full flex items-center gap-3 text-white/70">
+                <input type="checkbox" checked={form.accepted} onChange={(e) => setForm({ ...form, accepted: e.target.checked })} />
+                I consent to biometric storage and agree to Auwntech terms.
+              </label>
+              <div className="col-span-full rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/70">
+                Summary: password and PIN secure every transaction. Admin is notified if someone enters wrong credentials more than allowed attempts.
+              </div>
+            </div>
+          )}
+        </div>
+        {message && <p className="mt-4 text-sm text-emerald-300">{message}</p>}
+        <div className="mt-8 flex flex-wrap gap-4">
+          {currentStep > 1 && (
+            <button onClick={back} className="rounded-full border border-white/20 px-6 py-3 text-white">
+              Back
+            </button>
+          )}
+          {currentStep < steps.length && (
+            <button
+              onClick={next}
+              disabled={!canContinue()}
+              className="rounded-full bg-gradient-to-r from-teal-500 to-emerald-300 px-6 py-3 font-semibold text-black disabled:opacity-30"
+            >
+              Continue
+            </button>
+          )}
+          {currentStep === steps.length && (
+            <button
+              onClick={handleSubmit}
+              disabled={!canContinue() || loading}
+              className="rounded-full bg-gradient-to-r from-teal-500 to-emerald-300 px-6 py-3 font-semibold text-black disabled:opacity-30"
+            >
+              {loading ? "Creating..." : "Create account"}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
